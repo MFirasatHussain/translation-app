@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
-export default function useTranslation(sourceLanguage, targetLanguage) {
+export default function useSpeechRecognition() {
   const [transcript, setTranscript] = useState('');
-  const [translation, setTranslation] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState(null);
 
@@ -16,9 +15,7 @@ export default function useTranslation(sourceLanguage, targetLanguage) {
 
     recognition.continuous = true;
     recognition.interimResults = true;
-    // Map language codes to speech recognition format
-    const langCode = sourceLanguage.includes('-') ? sourceLanguage : `${sourceLanguage}-${sourceLanguage.toUpperCase()}`;
-    recognition.lang = langCode;
+    recognition.lang = 'en-US'; // Default to English
 
     recognition.onresult = (event) => {
       const current = event.resultIndex;
@@ -26,11 +23,6 @@ export default function useTranslation(sourceLanguage, targetLanguage) {
       const transcriptText = result[0].transcript;
       
       setTranscript(transcriptText);
-      
-      // Only translate final results
-      if (result.isFinal) {
-        translateText(transcriptText);
-      }
     };
 
     recognition.onerror = (event) => {
@@ -50,33 +42,7 @@ export default function useTranslation(sourceLanguage, targetLanguage) {
         recognition.stop();
       }
     };
-  }, [recognition, sourceLanguage]);
-
-  const translateText = async (text) => {
-    try {
-      const response = await fetch(`/api/translate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text,
-          sourceLanguage,
-          targetLanguage,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Translation failed');
-      }
-
-      const data = await response.json();
-      setTranslation(data.translatedText);
-    } catch (err) {
-      console.error('Translation error:', err);
-      setError(err.message);
-    }
-  };
+  }, [recognition, isListening]);
 
   const startListening = useCallback(() => {
     if (!recognition) return;
@@ -100,7 +66,6 @@ export default function useTranslation(sourceLanguage, targetLanguage) {
 
   return {
     transcript,
-    translation,
     isListening,
     error,
     startListening,

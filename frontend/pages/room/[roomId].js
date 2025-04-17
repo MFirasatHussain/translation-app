@@ -3,10 +3,8 @@ import { useRouter } from "next/router";
 import { useEffect, useRef, useState } from "react";
 import useSocket from "@/hooks/useSocket";
 import setupPeer from "@/hooks/peer";
+import useSpeechRecognition from "@/hooks/useSpeechRecognition";
 import { v4 as uuidv4 } from "uuid";
-import LanguageSelector from "@/components/LanguageSelector";
-import Captions from "@/components/Captions";
-import useTranslation from "@/hooks/useTranslation";
 
 export default function Room() {
   const router = useRouter();
@@ -27,17 +25,6 @@ export default function Room() {
   const [isLocalAudioMuted, setIsLocalAudioMuted] = useState(false);
   const [isLocalVideoOff, setIsLocalVideoOff] = useState(false);
   const [remotePeerId, setRemotePeerId] = useState(null);
-  
-  // Translation states
-  const [targetLanguage, setTargetLanguage] = useState('es');
-  const {
-    transcript,
-    translation,
-    isListening,
-    error: translationError,
-    startListening,
-    stopListening
-  } = useTranslation(targetLanguage);
 
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
@@ -45,6 +32,16 @@ export default function Room() {
   const peerRef = useRef(null);
 
   const socketRef = useSocket(roomId, userId);
+
+  const [remoteTranscript, setRemoteTranscript] = useState('');
+  
+  const {
+    transcript,
+    isListening,
+    error: speechError,
+    startListening,
+    stopListening,
+  } = useSpeechRecognition();
 
   useEffect(() => {
     console.log("🧠 RoomID:", roomId);
@@ -90,11 +87,21 @@ export default function Room() {
     };
   }, []);
 
-  // Setup peer connection
+  // Setup peer connection with transcript handling
   useEffect(() => {
     if (roomId && socketRef.current && userId && localStreamReady) {
       console.log("🧠 setupPeer conditions met, setting up...");
-      const peer = setupPeer(roomId, socketRef, userId, localStreamRef, setRemoteStream);
+      const peer = setupPeer(
+        roomId, 
+        socketRef, 
+        userId, 
+        localStreamRef, 
+        setRemoteStream,
+        // Add transcript handler
+        (text) => {
+          setRemoteTranscript(text);
+        }
+      );
       peerRef.current = peer;
 
       // Update debug info when peer ID is available
@@ -198,10 +205,12 @@ export default function Room() {
     }
   }, [remoteStream]);
 
-  // Handle language change
-  const handleLanguageChange = (language) => {
-    setTargetLanguage(language);
-  };
+  // Send transcript to remote peer
+  useEffect(() => {
+    if (transcript && remotePeerId && peerRef.current) {
+      peerRef.current.sendTranscript(remotePeerId, transcript);
+    }
+  }, [transcript, remotePeerId]);
 
   // Toggle speech recognition
   const toggleSpeechRecognition = () => {
@@ -217,12 +226,8 @@ export default function Room() {
       <div className="w-full max-w-4xl">
         <h1 className="text-2xl font-bold mb-4">Room: {roomId || "loading..."}</h1>
         
-        {/* Language selector */}
-        <div className="mb-4 flex justify-center">
-          <LanguageSelector onLanguageChange={handleLanguageChange} />
-        </div>
-        
         <div className="flex flex-col md:flex-row gap-4 justify-center">
+          {/* Local video container */}
           <div className="relative">
             <div className="flex justify-between items-center mb-1">
               <p className="text-center">You</p>
@@ -237,9 +242,6 @@ export default function Room() {
               muted
               className="w-full md:w-64 h-48 bg-black rounded-lg transform -scale-x-100"
             />
-            
-            {/* Local captions */}
-            <Captions text={translation} isLocal={true} />
             
             {/* Local media controls */}
             <div className="flex justify-center mt-2 space-x-2">
@@ -276,27 +278,23 @@ export default function Room() {
               <button 
                 onClick={toggleSpeechRecognition}
                 className={`p-2 rounded-full ${isListening ? 'bg-green-600' : 'bg-gray-600'}`}
-                title={isListening ? "Stop listening" : "Start listening"}
+                title={isListening ? "Stop transcription" : "Start transcription"}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
                 </svg>
               </button>
             </div>
-            
-            {/* Speech recognition status */}
-            {isListening && (
-              <div className="mt-2 text-center text-sm text-green-400">
-                Listening... {transcript && <span className="text-gray-300">"{transcript}"</span>}
-              </div>
-            )}
-            
-            {translationError && (
+
+            {/* Only show error if there is one */}
+            {speechError && (
               <div className="mt-2 text-center text-sm text-red-400">
-                Error: {translationError}
+                Error: {speechError}
               </div>
             )}
           </div>
+
+          {/* Remote video container */}
           <div className="relative">
             <div className="flex justify-between items-center mb-1">
               <p className="text-center">Other Person</p>
@@ -312,6 +310,13 @@ export default function Room() {
               playsInline
               className="w-full md:w-64 h-48 bg-black rounded-lg"
             />
+            
+            {/* Remote transcript */}
+            {remoteTranscript && (
+              <div className="absolute bottom-4 left-0 right-0 mx-auto w-max max-w-[80%] px-4 py-2 bg-black bg-opacity-70 rounded-md">
+                <p className="text-white text-sm">{remoteTranscript}</p>
+              </div>
+            )}
           </div>
         </div>
         
