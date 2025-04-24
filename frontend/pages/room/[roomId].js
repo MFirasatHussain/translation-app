@@ -25,9 +25,21 @@ export default function Room() {
   });
   
   // Language selection states
-  const [sourceLanguage, setSourceLanguage] = useState('en');
-  const [targetLanguage, setTargetLanguage] = useState('es');
+  const [sourceLanguage, setSourceLanguage] = useState(() => {
+    // Load from localStorage or default to 'en'
+    return localStorage.getItem('sourceLanguage') || 'en';
+  });
+  const [targetLanguage, setTargetLanguage] = useState(() => {
+    // Load from localStorage or default to 'es'
+    return localStorage.getItem('targetLanguage') || 'es';
+  });
   
+  // Save language preferences to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('sourceLanguage', sourceLanguage);
+    localStorage.setItem('targetLanguage', targetLanguage);
+  }, [sourceLanguage, targetLanguage]);
+
   // Media control states
   const [isLocalAudioEnabled, setIsLocalAudioEnabled] = useState(false);
   const [isLocalVideoEnabled, setIsLocalVideoEnabled] = useState(true);
@@ -126,18 +138,53 @@ export default function Room() {
         wantsToHear: targetLanguage
       };
       peerRef.current.send(remotePeerId, 'language-preferences', { preferences });
-      console.log('Sent language preferences:', preferences);
+      console.log('📢 Sent language preferences:', preferences);
     } else {
-      console.warn('Cannot send preferences - no peer connection');
+      console.warn('⚠️ Cannot send preferences - no peer connection');
     }
   };
 
-  // Send language preferences whenever peer connection is established
+  // Periodically resend language preferences to ensure they're not lost
   useEffect(() => {
     if (remotePeerId && peerRef.current) {
+      // Send immediately
       sendLanguagePreferences();
+
+      // Set up periodic resend every 30 seconds
+      const intervalId = setInterval(() => {
+        if (remotePeerId && peerRef.current) {
+          sendLanguagePreferences();
+        }
+      }, 30000);
+
+      return () => clearInterval(intervalId);
     }
-  }, [remotePeerId]);
+  }, [remotePeerId, sourceLanguage, targetLanguage]);
+
+  // Handle receiving language preferences with persistence
+  useEffect(() => {
+    if (peerRef.current) {
+      peerRef.current.on('language-preferences', (preferences) => {
+        console.log('📢 Received language preferences:', preferences);
+        setRemoteUserLanguages(preferences);
+        // Store remote preferences in localStorage
+        localStorage.setItem('remoteUserLanguages', JSON.stringify(preferences));
+      });
+    }
+  }, [peerRef.current]);
+
+  // Load stored remote preferences on component mount
+  useEffect(() => {
+    const storedPreferences = localStorage.getItem('remoteUserLanguages');
+    if (storedPreferences) {
+      try {
+        const preferences = JSON.parse(storedPreferences);
+        setRemoteUserLanguages(preferences);
+      } catch (error) {
+        console.error('Error parsing stored preferences:', error);
+      }
+    }
+  }, []);
 
   // Setup peer connection with transcript and language preferences handling
   useEffect(() => {
@@ -294,17 +341,45 @@ export default function Room() {
         };
 
         mediaRecorderRef.current.onstop = async () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-          // Save locally
-          const timestamp = new Date().toLocaleTimeString();
-          const url = URL.createObjectURL(audioBlob);
-          setLocalRecordings(prev => [...prev, { url, timestamp }]);
-          
-          // Send to remote peer
-          if (remotePeerId && peerRef.current) {
-            peerRef.current.send(remotePeerId, 'audio-message', { audioBlob });
+          try {
+            console.log('🎙️ Recording stopped, processing audio...');
+            const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+            
+            // Save locally
+            const timestamp = new Date().toLocaleTimeString();
+            const url = URL.createObjectURL(audioBlob);
+            setLocalRecordings(prev => [...prev, { url, timestamp }]);
+
+            // Automatically start translation if we have remote user's preferences
+            if (remoteUserLanguages.wantsToHear) {
+              console.log('🔄 Starting automatic translation...');
+              setIsTranslating(true);
+              
+              try {
+                // Wait a short moment before starting translation
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Check if we have all required data before proceeding
+                if (!remotePeerId || !peerRef.current) {
+                  throw new Error('Peer connection not ready');
+                }
+                
+                // Translate the audio
+                await translateAudio(audioBlob);
+              } catch (error) {
+                console.error('❌ Auto-translation/sending failed:', error);
+                setIsTranslating(false);
+                alert('Failed to process audio. You can try using the manual translation button.');
+              }
+            } else {
+              console.warn('⚠️ Cannot auto-translate - waiting for remote user language preferences');
+            }
+            
+            stream.getTracks().forEach(track => track.stop());
+          } catch (error) {
+            console.error('❌ Error processing recording:', error);
+            alert('Error processing recording. Please try again.');
           }
-          stream.getTracks().forEach(track => track.stop());
         };
 
         mediaRecorderRef.current.start();
@@ -315,6 +390,7 @@ export default function Room() {
         }
       } catch (err) {
         console.error('Error starting recording:', err);
+        alert('Could not start recording. Please check your microphone permissions.');
       }
     }
   };
@@ -368,16 +444,6 @@ export default function Room() {
     }
   };
 
-  // Handle receiving language preferences
-  useEffect(() => {
-    if (peerRef.current) {
-      peerRef.current.on('language-preferences', (preferences) => {
-        console.log('Received language preferences:', preferences);
-        setRemoteUserLanguages(preferences);
-      });
-    }
-  }, [peerRef.current]);
-
   // Handle incoming recording state changes and audio messages
   useEffect(() => {
     if (peerRef.current) {
@@ -416,20 +482,9 @@ export default function Room() {
         const url = URL.createObjectURL(data.audioBlob);
         console.log('🔗 Created URL for audio:', url);
 
-        // Verify the blob is valid
-        const testAudio = new Audio(url);
-        testAudio.onloadedmetadata = () => {
-          console.log('✅ Audio blob is valid:', {
-            duration: testAudio.duration,
-            readyState: testAudio.readyState
-          });
-        };
-        testAudio.onerror = (e) => {
-          console.error('❌ Audio blob is invalid:', e);
-        };
-
         const timestamp = new Date().toLocaleTimeString();
         
+        // Update UI with new audio message
         setReceivedAudios(prev => {
           console.log('📝 Updating received audios. Current count:', prev.length);
           return [...prev, {
@@ -438,7 +493,8 @@ export default function Room() {
             fromLanguage: data.fromLanguage,
             toLanguage: data.toLanguage,
             sourceText: data.sourceText,
-            translatedText: data.translatedText
+            translatedText: data.translatedText,
+            played: false // Add played flag
           }];
         });
       });
@@ -457,6 +513,65 @@ export default function Room() {
       });
     }
   }, [peerRef.current]);
+
+  // New effect to handle auto-playing of received audios
+  useEffect(() => {
+    const playNextUnplayedAudio = async () => {
+      // Find the first unplayed audio
+      const unplayedIndex = receivedAudios.findIndex(audio => !audio.played);
+      
+      if (unplayedIndex === -1) {
+        return; // No unplayed audios
+      }
+
+      const audioToPlay = receivedAudios[unplayedIndex];
+      
+      try {
+        console.log('⏳ Waiting 2 seconds before playing new audio message...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        console.log('🎵 Attempting to play audio message from:', audioToPlay.timestamp);
+        
+        const audio = new Audio(audioToPlay.url);
+        
+        // Create a promise to handle audio loading
+        await new Promise((resolve, reject) => {
+          audio.onloadeddata = () => {
+            console.log('✅ Audio loaded successfully:', {
+              duration: audio.duration,
+              readyState: audio.readyState
+            });
+            resolve();
+          };
+          audio.onerror = (e) => {
+            console.error('❌ Audio loading failed:', e);
+            reject(new Error('Failed to load audio'));
+          };
+        });
+
+        // Play the audio
+        await audio.play();
+        console.log('✅ Audio playback started');
+
+        // Mark the audio as played
+        setReceivedAudios(prev => prev.map((item, index) => 
+          index === unplayedIndex ? { ...item, played: true } : item
+        ));
+
+        // Clean up after playback
+        audio.onended = () => {
+          console.log('✅ Audio playback completed');
+        };
+      } catch (error) {
+        console.error('❌ Error playing audio:', error);
+      }
+    };
+
+    // Start playing if there are any unplayed audios
+    if (receivedAudios.some(audio => !audio.played)) {
+      playNextUnplayedAudio();
+    }
+  }, [receivedAudios]); // Run effect when receivedAudios changes
 
   // Log when remote peer ID changes
   useEffect(() => {
@@ -485,6 +600,7 @@ export default function Room() {
   const translateAudio = async (audioBlob) => {
     setIsTranslating(true);
     try {
+      console.log('🎯 Starting translation process...');
       // Create form data
       const formData = new FormData();
       formData.append('audio', audioBlob);
@@ -515,24 +631,36 @@ export default function Room() {
       const sourceText = sourceTextB64 ? new TextDecoder().decode(base64ToUint8Array(sourceTextB64)) : '';
       const translatedText = translatedTextB64 ? new TextDecoder().decode(base64ToUint8Array(translatedTextB64)) : '';
       
-      console.log('Transcription:', sourceText);
-      console.log('Translation:', translatedText);
-      
-      // Save translation data for later sending
-      setTranslationData({
+      console.log('✅ Translation completed:', {
+        sourceText,
+        translatedText,
+        audioBlobSize: translatedAudioBlob.size
+      });
+
+      // Create translation data
+      const newTranslationData = {
         audioBlob: translatedAudioBlob,
         fromLanguage: sourceLanguage,
         toLanguage: remoteUserLanguages.wantsToHear,
         sourceText,
         translatedText
-      });
+      };
 
-      // Set the translated audio URL for local playback
+      // Set the translation data and URL
+      setTranslationData(newTranslationData);
       setTranslatedAudioUrl(url);
+      
+      console.log('⏳ Waiting 2 seconds before auto-sending...');
+      // Wait 2 seconds to show the send button and translation results
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Automatically send the translated audio
+      console.log('🚀 Auto-sending translated audio...');
+      await sendTranslatedAudio(newTranslationData);
 
       return url;
     } catch (error) {
-      console.error('Translation error:', error);
+      console.error('❌ Translation error:', error);
       throw error;
     } finally {
       setIsTranslating(false);
@@ -559,35 +687,56 @@ export default function Room() {
     return chunks;
   };
 
-  const sendTranslatedAudio = () => {
-    if (remotePeerId && peerRef.current && translationData) {
-      console.log('🎯 Attempting to send audio message to peer:', remotePeerId);
-      console.log('📦 Translation data being sent:', {
-        fromLanguage: translationData.fromLanguage,
-        toLanguage: translationData.toLanguage,
-        sourceText: translationData.sourceText,
-        translatedText: translationData.translatedText,
-        audioBlobSize: translationData.audioBlob.size,
-        audioBlobType: translationData.audioBlob.type
-      });
+  // Modified sendTranslatedAudio to ensure we have all required data
+  const sendTranslatedAudio = async (dataToSend = null) => {
+    // Use provided data or fall back to state
+    const translationDataToUse = dataToSend || translationData;
 
-      try {
-        // First verify the blob is valid
-        const testUrl = URL.createObjectURL(translationData.audioBlob);
-        const testAudio = new Audio(testUrl);
-        
-        testAudio.onloadedmetadata = () => {
+    // Validate all required data is present
+    if (!remotePeerId) {
+      console.error('❌ Cannot send audio: No remote peer ID');
+      throw new Error('No remote peer connection available');
+    }
+
+    if (!peerRef.current) {
+      console.error('❌ Cannot send audio: No peer reference');
+      throw new Error('No peer connection available');
+    }
+
+    if (!translationDataToUse || !translationDataToUse.audioBlob) {
+      console.error('❌ Cannot send audio: No translation data available');
+      throw new Error('Missing translation data');
+    }
+
+    console.log('🎯 Attempting to send audio message to peer:', remotePeerId);
+    console.log('📦 Translation data being sent:', {
+      fromLanguage: translationDataToUse.fromLanguage,
+      toLanguage: translationDataToUse.toLanguage,
+      sourceText: translationDataToUse.sourceText,
+      translatedText: translationDataToUse.translatedText,
+      audioBlobSize: translationDataToUse.audioBlob.size,
+      audioBlobType: translationDataToUse.audioBlob.type
+    });
+
+    try {
+      // First verify the blob is valid
+      const testUrl = URL.createObjectURL(translationDataToUse.audioBlob);
+      const testAudio = new Audio(testUrl);
+      
+      return new Promise((resolve, reject) => {
+        testAudio.onloadedmetadata = async () => {
           console.log('✅ Source audio blob is valid:', {
             duration: testAudio.duration,
             readyState: testAudio.readyState,
-            size: translationData.audioBlob.size
+            size: translationDataToUse.audioBlob.size
           });
           URL.revokeObjectURL(testUrl);
 
-          // Convert Blob to ArrayBuffer for sending
-          translationData.audioBlob.arrayBuffer().then(buffer => {
+          try {
+            // Convert Blob to ArrayBuffer for sending
+            const buffer = await translationDataToUse.audioBlob.arrayBuffer();
             console.log('🔄 Converting to ArrayBuffer:', {
-              originalSize: translationData.audioBlob.size,
+              originalSize: translationDataToUse.audioBlob.size,
               bufferSize: buffer.byteLength
             });
 
@@ -595,13 +744,14 @@ export default function Room() {
             const uint8Array = new Uint8Array(buffer);
             const regularArray = Array.from(uint8Array);
 
-            // Split the array into chunks (16KB chunks)
-            const chunks = chunkArray(regularArray, 16 * 1024);
+            // Split the array into smaller chunks (1KB chunks)
+            const CHUNK_SIZE = 1024; // 1KB chunks
+            const chunks = chunkArray(regularArray, CHUNK_SIZE);
             const totalChunks = chunks.length;
 
             console.log('🔄 Splitting audio into chunks:', {
               totalChunks,
-              chunkSize: chunks[0].length,
+              chunkSize: CHUNK_SIZE,
               totalSize: regularArray.length
             });
 
@@ -610,56 +760,66 @@ export default function Room() {
               type: 'audio-info',
               messageId: Date.now().toString(),
               totalChunks,
-              fromLanguage: translationData.fromLanguage,
-              toLanguage: translationData.toLanguage,
-              sourceText: translationData.sourceText,
-              translatedText: translationData.translatedText,
-              totalSize: regularArray.length
+              fromLanguage: translationDataToUse.fromLanguage,
+              toLanguage: translationDataToUse.toLanguage,
+              sourceText: translationDataToUse.sourceText,
+              translatedText: translationDataToUse.translatedText,
+              totalSize: regularArray.length,
+              chunkSize: CHUNK_SIZE
             };
 
             peerRef.current.send(remotePeerId, 'audio-info', audioInfo);
+            console.log('✅ Sent audio info');
 
-            // Send chunks with slight delay to prevent overwhelming the connection
-            chunks.forEach((chunk, index) => {
-              setTimeout(() => {
-                const chunkData = {
-                  type: 'audio-chunk',
-                  messageId: audioInfo.messageId,
-                  chunkIndex: index,
-                  totalChunks,
-                  data: chunk
-                };
+            // Send chunks with longer delay to prevent overwhelming the connection
+            let successfulChunks = 0;
+            
+            const sendChunk = (index) => {
+              if (index >= totalChunks) {
+                console.log(`✅ All chunks sent successfully (${successfulChunks}/${totalChunks})`);
+                resolve();
+                return;
+              }
 
+              const chunkData = {
+                type: 'audio-chunk',
+                messageId: audioInfo.messageId,
+                chunkIndex: index,
+                totalChunks,
+                data: chunks[index]
+              };
+
+              try {
                 peerRef.current.send(remotePeerId, 'audio-chunk', chunkData);
                 console.log(`✅ Sent chunk ${index + 1}/${totalChunks}`);
+                successfulChunks++;
+                
+                // Schedule next chunk with longer delay (200ms)
+                setTimeout(() => sendChunk(index + 1), 200);
+              } catch (error) {
+                console.error(`❌ Error sending chunk ${index + 1}:`, error);
+                // Retry this chunk after a longer delay (500ms)
+                setTimeout(() => sendChunk(index), 500);
+              }
+            };
 
-                // Show completion alert after sending last chunk
-                if (index === totalChunks - 1) {
-                  alert('Audio sent successfully!');
-                }
-              }, index * 100); // 100ms delay between chunks
-            });
+            // Start sending chunks
+            sendChunk(0);
 
-          }).catch(error => {
-            console.error('❌ Error converting blob to buffer:', error);
-            alert('Failed to send audio. Please try again.');
-          });
+          } catch (error) {
+            console.error('❌ Error processing audio for sending:', error);
+            reject(error);
+          }
         };
 
         testAudio.onerror = (e) => {
           console.error('❌ Source audio blob is invalid:', e);
-          alert('Invalid audio data. Please try again.');
+          reject(new Error('Invalid audio data'));
         };
-      } catch (error) {
-        console.error('❌ Error sending audio message:', error);
-        alert('Failed to send audio. Please try again.');
-      }
-    } else {
-      console.warn('⚠️ Cannot send audio:', {
-        hasRemotePeerId: !!remotePeerId,
-        hasPeerRef: !!peerRef.current,
-        hasTranslationData: !!translationData
       });
+    } catch (error) {
+      console.error('❌ Error sending audio message:', error);
+      throw error;
     }
   };
 
@@ -827,6 +987,7 @@ export default function Room() {
                   <div className="flex-1">
                     <p className="text-sm text-gray-300 mb-2">
                       Received at {audio.timestamp}
+                      {audio.played && <span className="ml-2 text-green-400">(Played)</span>}
                       <br />
                       From: {languages.find(l => l.code === audio.fromLanguage)?.name || audio.fromLanguage}
                       {' → '}
@@ -841,22 +1002,7 @@ export default function Room() {
                   </div>
                   <button
                     onClick={() => {
-                      console.log("🎵 Playing audio:", {
-                        url: audio.url,
-                        timestamp: audio.timestamp,
-                        fromLanguage: audio.fromLanguage,
-                        toLanguage: audio.toLanguage
-                      });
                       const audioElement = new Audio(audio.url);
-                      audioElement.onerror = (e) => {
-                        console.error("❌ Audio playback error:", e);
-                      };
-                      audioElement.onloadedmetadata = () => {
-                        console.log("✅ Audio metadata loaded:", {
-                          duration: audioElement.duration,
-                          readyState: audioElement.readyState
-                        });
-                      };
                       audioElement.play().catch(error => {
                         console.error("❌ Audio play error:", error);
                       });

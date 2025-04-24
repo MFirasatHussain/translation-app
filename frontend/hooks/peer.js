@@ -80,12 +80,18 @@ export default function setupPeer(roomId, socketRef, userId, localStreamRef, set
         onLanguagePreferencesReceived(data.preferences);
       } else if (data.type === 'audio-info') {
         // Initialize storage for this audio message
+        console.log("📝 Initializing audio chunks storage for message:", data.messageId, {
+          totalChunks: data.totalChunks,
+          totalSize: data.totalSize,
+          chunkSize: data.chunkSize
+        });
+
         audioChunks.set(data.messageId, {
           chunks: new Array(data.totalChunks),
           info: data,
-          receivedChunks: 0
+          receivedChunks: 0,
+          lastChunkTime: Date.now()
         });
-        console.log("📝 Initialized audio chunks storage for message:", data.messageId);
       } else if (data.type === 'audio-chunk') {
         const messageStore = audioChunks.get(data.messageId);
         if (!messageStore) {
@@ -93,65 +99,72 @@ export default function setupPeer(roomId, socketRef, userId, localStreamRef, set
           return;
         }
 
-        // Store the chunk
-        messageStore.chunks[data.chunkIndex] = data.data;
-        messageStore.receivedChunks++;
+        try {
+          // Store the chunk
+          messageStore.chunks[data.chunkIndex] = data.data;
+          messageStore.receivedChunks++;
+          messageStore.lastChunkTime = Date.now();
 
-        console.log(`📦 Received chunk ${data.chunkIndex + 1}/${data.totalChunks} for message ${data.messageId}`);
+          const progress = (messageStore.receivedChunks / data.totalChunks * 100).toFixed(1);
+          console.log(`📦 Received chunk ${data.chunkIndex + 1}/${data.totalChunks} (${progress}%)`);
 
-        // Check if we have all chunks
-        if (messageStore.receivedChunks === data.totalChunks) {
-          console.log("✅ All chunks received, reconstructing audio");
-          
-          try {
-            // Concatenate all chunks
-            const completeArray = [].concat(...messageStore.chunks);
-            const arrayBuffer = new Uint8Array(completeArray).buffer;
-
-            // Create a new Blob from the ArrayBuffer
-            const audioBlob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
-            console.log("✅ Created audio blob:", {
-              size: audioBlob.size,
-              type: audioBlob.type
-            });
-
-            // Verify the blob is valid
-            const testUrl = URL.createObjectURL(audioBlob);
-            const testAudio = new Audio(testUrl);
+          // Check if we have all chunks
+          if (messageStore.receivedChunks === data.totalChunks) {
+            console.log("✅ All chunks received, reconstructing audio");
             
-            testAudio.onloadedmetadata = () => {
-              console.log("✅ Audio blob verified:", {
-                duration: testAudio.duration,
-                readyState: testAudio.readyState
-              });
-              URL.revokeObjectURL(testUrl);
+            try {
+              // Concatenate all chunks
+              const completeArray = [].concat(...messageStore.chunks);
+              const arrayBuffer = new Uint8Array(completeArray).buffer;
 
-              // Create the complete message
-              const message = {
-                audioBlob,
-                fromLanguage: messageStore.info.fromLanguage,
-                toLanguage: messageStore.info.toLanguage,
-                sourceText: messageStore.info.sourceText,
-                translatedText: messageStore.info.translatedText
+              // Create a new Blob from the ArrayBuffer
+              const audioBlob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+              console.log("✅ Created audio blob:", {
+                size: audioBlob.size,
+                type: audioBlob.type
+              });
+
+              // Verify the blob is valid
+              const testUrl = URL.createObjectURL(audioBlob);
+              const testAudio = new Audio(testUrl);
+              
+              testAudio.onloadedmetadata = () => {
+                console.log("✅ Audio blob verified:", {
+                  duration: testAudio.duration,
+                  readyState: testAudio.readyState
+                });
+                URL.revokeObjectURL(testUrl);
+
+                // Create the complete message
+                const message = {
+                  audioBlob,
+                  fromLanguage: messageStore.info.fromLanguage,
+                  toLanguage: messageStore.info.toLanguage,
+                  sourceText: messageStore.info.sourceText,
+                  translatedText: messageStore.info.translatedText
+                };
+
+                // Clean up the chunks
+                audioChunks.delete(data.messageId);
+
+                // Deliver the complete message
+                onAudioMessageReceived(message);
               };
 
-              // Clean up the chunks
+              testAudio.onerror = (e) => {
+                console.error("❌ Audio blob verification failed:", e);
+                URL.revokeObjectURL(testUrl);
+                audioChunks.delete(data.messageId);
+              };
+
+            } catch (error) {
+              console.error("❌ Error reconstructing audio:", error);
               audioChunks.delete(data.messageId);
-
-              // Deliver the complete message
-              onAudioMessageReceived(message);
-            };
-
-            testAudio.onerror = (e) => {
-              console.error("❌ Audio blob verification failed:", e);
-              URL.revokeObjectURL(testUrl);
-              audioChunks.delete(data.messageId);
-            };
-
-          } catch (error) {
-            console.error("❌ Error reconstructing audio:", error);
-            audioChunks.delete(data.messageId);
+            }
           }
+        } catch (error) {
+          console.error("❌ Error processing chunk:", error);
+          audioChunks.delete(data.messageId);
         }
       }
     });
