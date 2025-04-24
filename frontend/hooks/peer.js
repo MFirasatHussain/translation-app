@@ -1,7 +1,7 @@
 // frontend/hooks/peer.js
 import Peer from "peerjs";
 
-export default function setupPeer(roomId, socketRef, userId, localStreamRef, setRemoteStream, onTranscriptReceived, onLanguagePreferencesReceived) {
+export default function setupPeer(roomId, socketRef, userId, localStreamRef, setRemoteStream, onTranscriptReceived, onLanguagePreferencesReceived, onAudioMessageReceived) {
   console.log("🔧 Setting up peer with ID:", userId);
   
   // Get the current host IP address for better cross-device connectivity
@@ -38,6 +38,9 @@ export default function setupPeer(roomId, socketRef, userId, localStreamRef, set
   // Store data connections
   const dataConnections = new Map();
 
+  // Store for audio chunks
+  const audioChunks = new Map();
+
   // Function to ensure data connection exists
   const ensureDataConnection = (peerId) => {
     if (!dataConnections.has(peerId)) {
@@ -63,12 +66,93 @@ export default function setupPeer(roomId, socketRef, userId, localStreamRef, set
     });
     
     conn.on('data', (data) => {
-      console.log("Received data from peer:", peerId, data);
+      console.log("Received data from peer:", peerId, {
+        type: data.type,
+        messageId: data.messageId,
+        chunkIndex: data.chunkIndex,
+        totalChunks: data.totalChunks
+      });
+
       if (data.type === 'transcript') {
         onTranscriptReceived(data.text);
       } else if (data.type === 'language-preferences') {
         console.log("📢 Received language preferences:", data.preferences);
         onLanguagePreferencesReceived(data.preferences);
+      } else if (data.type === 'audio-info') {
+        // Initialize storage for this audio message
+        audioChunks.set(data.messageId, {
+          chunks: new Array(data.totalChunks),
+          info: data,
+          receivedChunks: 0
+        });
+        console.log("📝 Initialized audio chunks storage for message:", data.messageId);
+      } else if (data.type === 'audio-chunk') {
+        const messageStore = audioChunks.get(data.messageId);
+        if (!messageStore) {
+          console.error("❌ Received chunk for unknown message:", data.messageId);
+          return;
+        }
+
+        // Store the chunk
+        messageStore.chunks[data.chunkIndex] = data.data;
+        messageStore.receivedChunks++;
+
+        console.log(`📦 Received chunk ${data.chunkIndex + 1}/${data.totalChunks} for message ${data.messageId}`);
+
+        // Check if we have all chunks
+        if (messageStore.receivedChunks === data.totalChunks) {
+          console.log("✅ All chunks received, reconstructing audio");
+          
+          try {
+            // Concatenate all chunks
+            const completeArray = [].concat(...messageStore.chunks);
+            const arrayBuffer = new Uint8Array(completeArray).buffer;
+
+            // Create a new Blob from the ArrayBuffer
+            const audioBlob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+            console.log("✅ Created audio blob:", {
+              size: audioBlob.size,
+              type: audioBlob.type
+            });
+
+            // Verify the blob is valid
+            const testUrl = URL.createObjectURL(audioBlob);
+            const testAudio = new Audio(testUrl);
+            
+            testAudio.onloadedmetadata = () => {
+              console.log("✅ Audio blob verified:", {
+                duration: testAudio.duration,
+                readyState: testAudio.readyState
+              });
+              URL.revokeObjectURL(testUrl);
+
+              // Create the complete message
+              const message = {
+                audioBlob,
+                fromLanguage: messageStore.info.fromLanguage,
+                toLanguage: messageStore.info.toLanguage,
+                sourceText: messageStore.info.sourceText,
+                translatedText: messageStore.info.translatedText
+              };
+
+              // Clean up the chunks
+              audioChunks.delete(data.messageId);
+
+              // Deliver the complete message
+              onAudioMessageReceived(message);
+            };
+
+            testAudio.onerror = (e) => {
+              console.error("❌ Audio blob verification failed:", e);
+              URL.revokeObjectURL(testUrl);
+              audioChunks.delete(data.messageId);
+            };
+
+          } catch (error) {
+            console.error("❌ Error reconstructing audio:", error);
+            audioChunks.delete(data.messageId);
+          }
+        }
       }
     });
     
