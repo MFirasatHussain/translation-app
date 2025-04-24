@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import useSocket from "@/hooks/useSocket";
 import setupPeer from "@/hooks/peer";
 import useSpeechRecognition from "@/hooks/useSpeechRecognition";
+import useTranslation from "@/hooks/useTranslation";
+import LanguageSelector from "@/components/LanguageSelector";
+import { languages } from "@/utils/languages";
 import { v4 as uuidv4 } from "uuid";
 
 export default function Room() {
@@ -20,6 +23,10 @@ export default function Room() {
     iceState: "unknown",
     lastError: ""
   });
+  
+  // Language selection states
+  const [sourceLanguage, setSourceLanguage] = useState('en');
+  const [targetLanguage, setTargetLanguage] = useState('es');
   
   // Media control states
   const [isLocalAudioMuted, setIsLocalAudioMuted] = useState(false);
@@ -42,6 +49,19 @@ export default function Room() {
     startListening,
     stopListening,
   } = useSpeechRecognition();
+
+  const {
+    translation,
+    error: translationError,
+    isPlaying,
+    translateAndPlay,
+  } = useTranslation(sourceLanguage, targetLanguage);
+
+  // Add state for remote user's language preferences
+  const [remoteUserLanguages, setRemoteUserLanguages] = useState({
+    speaks: '',
+    wantsToHear: ''
+  });
 
   useEffect(() => {
     console.log("🧠 RoomID:", roomId);
@@ -87,7 +107,28 @@ export default function Room() {
     };
   }, []);
 
-  // Setup peer connection with transcript handling
+  // Function to send language preferences to remote peer
+  const sendLanguagePreferences = () => {
+    if (remotePeerId && peerRef.current) {
+      const preferences = {
+        speaks: sourceLanguage,
+        wantsToHear: targetLanguage
+      };
+      peerRef.current.send(remotePeerId, 'language-preferences', { preferences });
+      console.log('Sent language preferences:', preferences);
+    } else {
+      console.warn('Cannot send preferences - no peer connection');
+    }
+  };
+
+  // Send language preferences whenever peer connection is established
+  useEffect(() => {
+    if (remotePeerId && peerRef.current) {
+      sendLanguagePreferences();
+    }
+  }, [remotePeerId]);
+
+  // Setup peer connection with transcript and language preferences handling
   useEffect(() => {
     if (roomId && socketRef.current && userId && localStreamReady) {
       console.log("🧠 setupPeer conditions met, setting up...");
@@ -100,14 +141,32 @@ export default function Room() {
         // Add transcript handler
         (text) => {
           setRemoteTranscript(text);
+        },
+        // Add language preferences handler
+        (preferences) => {
+          console.log('Received language preferences:', preferences);
+          setRemoteUserLanguages(preferences);
         }
       );
+
+      // Store peer reference
       peerRef.current = peer;
 
       // Update debug info when peer ID is available
-      peer.on("open", (id) => {
-        setDebugInfo(prev => ({ ...prev, peerId: id }));
-      });
+      if (peer) {
+        peer.on("open", (id) => {
+          console.log("Peer opened with ID:", id);
+          setDebugInfo(prev => ({ ...prev, peerId: id }));
+        });
+
+        // Handle peer connection
+        peer.on("connection", (conn) => {
+          console.log("New peer connection:", conn.peer);
+          setRemotePeerId(conn.peer);
+          // Send our preferences when we get a new connection
+          setTimeout(sendLanguagePreferences, 1000); // Small delay to ensure connection is ready
+        });
+      }
 
       // Update debug info when socket connects
       if (socketRef.current.connected) {
@@ -205,12 +264,20 @@ export default function Room() {
     }
   }, [remoteStream]);
 
-  // Send transcript to remote peer
+  // Update the transcript handling to include audio translation
   useEffect(() => {
     if (transcript && remotePeerId && peerRef.current) {
       peerRef.current.sendTranscript(remotePeerId, transcript);
+      translateAndPlay(transcript);
     }
-  }, [transcript, remotePeerId]);
+  }, [transcript, remotePeerId, translateAndPlay]);
+
+  // Handle remote transcript with audio translation
+  useEffect(() => {
+    if (remoteTranscript) {
+      translateAndPlay(remoteTranscript);
+    }
+  }, [remoteTranscript, translateAndPlay]);
 
   // Toggle speech recognition
   const toggleSpeechRecognition = () => {
@@ -221,11 +288,52 @@ export default function Room() {
     }
   };
 
+  // Handle receiving language preferences
+  useEffect(() => {
+    if (peerRef.current) {
+      peerRef.current.on('language-preferences', (preferences) => {
+        console.log('Received language preferences:', preferences);
+        setRemoteUserLanguages(preferences);
+      });
+    }
+  }, [peerRef.current]);
+
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white space-y-4 p-4">
       <div className="w-full max-w-4xl">
         <h1 className="text-2xl font-bold mb-4">Room: {roomId || "loading..."}</h1>
         
+        {/* Language Selection Section */}
+        <div className="mb-6 p-4 bg-gray-800 rounded-lg">
+          <div className="mb-4">
+            <LanguageSelector
+              sourceLanguage={sourceLanguage}
+              targetLanguage={targetLanguage}
+              onSourceLanguageChange={setSourceLanguage}
+              onTargetLanguageChange={setTargetLanguage}
+            />
+          </div>
+          
+          {/* Set Language Button */}
+          <div className="flex justify-center mt-4">
+            <button
+              onClick={sendLanguagePreferences}
+              className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-white font-medium"
+            >
+              Set Languages
+            </button>
+          </div>
+
+          {/* Show Remote User's Language Preferences */}
+          {remoteUserLanguages.speaks && (
+            <div className="mt-4 p-3 bg-gray-700 rounded-md">
+              <h3 className="text-sm font-medium mb-2">Other person's languages:</h3>
+              <p className="text-sm">Speaks: {languages.find(l => l.code === remoteUserLanguages.speaks)?.name || remoteUserLanguages.speaks}</p>
+              <p className="text-sm">Wants to hear: {languages.find(l => l.code === remoteUserLanguages.wantsToHear)?.name || remoteUserLanguages.wantsToHear}</p>
+            </div>
+          )}
+        </div>
+
         <div className="flex flex-col md:flex-row gap-4 justify-center">
           {/* Local video container */}
           <div className="relative">
@@ -235,16 +343,26 @@ export default function Room() {
                 {localStreamReady ? "✅ Local stream ready" : "⏳ Loading..."}
               </span>
             </div>
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full md:w-64 h-48 bg-black rounded-lg transform -scale-x-100"
-            />
+            {/* Local video - apply mirror effect */}
+            <div className="transform -scale-x-100">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full md:w-64 h-48 bg-black rounded-lg"
+              />
+            </div>
+            
+            {/* Local transcript */}
+            {transcript && (
+              <div className="absolute bottom-16 left-0 right-0 mx-auto w-max max-w-[80%] px-4 py-2 bg-blue-900 bg-opacity-70 rounded-md">
+                <p className="text-white text-sm">{transcript}</p>
+              </div>
+            )}
             
             {/* Local media controls */}
-            <div className="flex justify-center mt-2 space-x-2">
+            <div className="flex justify-center space-x-2 mt-2">
               <button 
                 onClick={toggleLocalAudio}
                 className={`p-2 rounded-full ${isLocalAudioMuted ? 'bg-red-600' : 'bg-blue-600'}`}
@@ -285,13 +403,6 @@ export default function Room() {
                 </svg>
               </button>
             </div>
-
-            {/* Only show error if there is one */}
-            {speechError && (
-              <div className="mt-2 text-center text-sm text-red-400">
-                Error: {speechError}
-              </div>
-            )}
           </div>
 
           {/* Remote video container */}
@@ -304,45 +415,41 @@ export default function Room() {
                  "⏳ Waiting for peer..."}
               </span>
             </div>
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="w-full md:w-64 h-48 bg-black rounded-lg"
-            />
+            {/* Remote video - apply mirror effect */}
+            <div className="transform -scale-x-100">
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="w-full md:w-64 h-48 bg-black rounded-lg"
+              />
+            </div>
             
             {/* Remote transcript */}
             {remoteTranscript && (
-              <div className="absolute bottom-4 left-0 right-0 mx-auto w-max max-w-[80%] px-4 py-2 bg-black bg-opacity-70 rounded-md">
+              <div className="absolute bottom-16 left-0 right-0 mx-auto w-max max-w-[80%] px-4 py-2 bg-green-900 bg-opacity-70 rounded-md">
                 <p className="text-white text-sm">{remoteTranscript}</p>
               </div>
             )}
           </div>
         </div>
         
+        {/* Translation status */}
+        <div className="mt-4 text-center">
+          {isPlaying && (
+            <p className="text-green-400">Playing translated audio...</p>
+          )}
+          {(speechError || translationError) && (
+            <p className="text-red-400">Error: {speechError || translationError}</p>
+          )}
+        </div>
+        
         {/* Debug information */}
-        <div className="mt-8 p-4 bg-gray-800 rounded-lg text-xs font-mono overflow-auto">
-          <h3 className="text-sm font-bold mb-2">Debug Information</h3>
-          <div className="grid grid-cols-2 gap-2">
-            <div>User ID: {userId}</div>
-            <div>Peer ID: {debugInfo.peerId || "Not connected"}</div>
-            <div>Socket: {debugInfo.socketConnected ? "✅ Connected" : "❌ Disconnected"}</div>
-            <div>ICE State: {debugInfo.iceState}</div>
-            <div className="col-span-2">Last Error: {debugInfo.lastError || "None"}</div>
-            <div className="col-span-2">
-              <button 
-                onClick={() => {
-                  if (peerRef.current) {
-                    console.log("🔄 Reconnecting peer...");
-                    peerRef.current.reconnect();
-                  }
-                }}
-                className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm mt-2"
-              >
-                Reconnect Peer
-              </button>
-            </div>
-          </div>
+        <div className="mt-4 p-4 bg-gray-800 rounded-lg">
+          <h2 className="text-lg font-semibold mb-2">Debug Info</h2>
+          <pre className="text-xs overflow-auto">
+            {JSON.stringify(debugInfo, null, 2)}
+          </pre>
         </div>
       </div>
     </div>

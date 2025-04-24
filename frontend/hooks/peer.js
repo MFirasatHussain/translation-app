@@ -1,7 +1,7 @@
 // frontend/hooks/peer.js
 import Peer from "peerjs";
 
-export default function setupPeer(roomId, socketRef, userId, localStreamRef, setRemoteStream, onTranscriptReceived) {
+export default function setupPeer(roomId, socketRef, userId, localStreamRef, setRemoteStream, onTranscriptReceived, onLanguagePreferencesReceived) {
   console.log("🔧 Setting up peer with ID:", userId);
   
   // Get the current host IP address for better cross-device connectivity
@@ -41,47 +41,52 @@ export default function setupPeer(roomId, socketRef, userId, localStreamRef, set
   // Function to ensure data connection exists
   const ensureDataConnection = (peerId) => {
     if (!dataConnections.has(peerId)) {
+      console.log("Creating new data connection to:", peerId);
       const conn = peer.connect(peerId, {
         reliable: true,
         serialization: 'json'
       });
       
-      conn.on('open', () => {
-        console.log("📡 Data connection opened with peer:", peerId);
-      });
-      
-      conn.on('error', (err) => {
-        console.error("❌ Data connection error:", err);
-      });
-      
-      conn.on('close', () => {
-        console.log("🚫 Data connection closed with peer:", peerId);
-        dataConnections.delete(peerId);
-      });
-      
+      setupDataConnectionHandlers(conn);
       dataConnections.set(peerId, conn);
     }
     return dataConnections.get(peerId);
+  };
+
+  // Setup handlers for data connections
+  const setupDataConnectionHandlers = (conn) => {
+    const peerId = conn.peer;
+    
+    conn.on('open', () => {
+      console.log("📡 Data connection opened with peer:", peerId);
+      dataConnections.set(peerId, conn);
+    });
+    
+    conn.on('data', (data) => {
+      console.log("Received data from peer:", peerId, data);
+      if (data.type === 'transcript') {
+        onTranscriptReceived(data.text);
+      } else if (data.type === 'language-preferences') {
+        console.log("📢 Received language preferences:", data.preferences);
+        onLanguagePreferencesReceived(data.preferences);
+      }
+    });
+    
+    conn.on('error', (err) => {
+      console.error("❌ Data connection error:", err);
+    });
+    
+    conn.on('close', () => {
+      console.log("🚫 Data connection closed with peer:", peerId);
+      dataConnections.delete(peerId);
+    });
   };
 
   // Handle incoming data connections
   peer.on('connection', (conn) => {
     const peerId = conn.peer;
     console.log("📥 Incoming data connection from:", peerId);
-    
-    conn.on('open', () => {
-      dataConnections.set(peerId, conn);
-    });
-
-    conn.on('data', (data) => {
-      if (data.type === 'transcript') {
-        onTranscriptReceived(data.text);
-      }
-    });
-    
-    conn.on('close', () => {
-      dataConnections.delete(peerId);
-    });
+    setupDataConnectionHandlers(conn);
   });
 
   // Connection state logging
@@ -231,9 +236,21 @@ export default function setupPeer(roomId, socketRef, userId, localStreamRef, set
     }
   };
 
-  // Expose functions on peer instance
+  // Add function to send data
+  const send = (peerId, type, data) => {
+    console.log(`Sending ${type} to peer:`, peerId, data);
+    const conn = ensureDataConnection(peerId);
+    if (conn && conn.open) {
+      conn.send({ type, ...data });
+    } else {
+      console.warn("⚠️ Cannot send data, connection not open:", peerId);
+    }
+  };
+
+  // Add methods to peer instance
   peer.sendMediaControl = sendMediaControl;
   peer.sendTranscript = sendTranscript;
+  peer.send = send;
 
   return peer;
 }
